@@ -1,24 +1,24 @@
 package sh.calaba.instrumentationbackend;
 
-import android.content.Intent;
-import android.os.Bundle;
 import sh.calaba.instrumentationbackend.actions.Actions;
 import sh.calaba.instrumentationbackend.actions.HttpServer;
 import android.Manifest;
 import android.app.Activity;
 import android.app.Instrumentation;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.location.LocationManager;
+import android.os.Bundle;
 import android.test.ActivityInstrumentationTestCase2;
 import android.util.Log;
 
 import com.jayway.android.robotium.solo.PublicViewFetcher;
 import com.jayway.android.robotium.solo.SoloEnhanced;
 
-public class InstrumentationBackend extends ActivityInstrumentationTestCase2 {
+public class InstrumentationBackend extends ActivityInstrumentationTestCase2<Activity> {
     public static String testPackage;
-    public static Class mainActivity;
+    public static Class<? extends Activity> mainActivity;
     public static Bundle extras;
     
     private static final String TAG = "InstrumentationBackend";
@@ -28,8 +28,9 @@ public class InstrumentationBackend extends ActivityInstrumentationTestCase2 {
     public static PublicViewFetcher viewFetcher;
     public static Actions actions;
 
+    @SuppressWarnings({ "deprecation", "unchecked" })
     public InstrumentationBackend() {
-        super(testPackage, mainActivity);
+        super(testPackage, (Class<Activity>) mainActivity);
     }
 
     @Override
@@ -39,7 +40,7 @@ public class InstrumentationBackend extends ActivityInstrumentationTestCase2 {
         i.setClassName(testPackage, mainActivity.getName());
         i.putExtras(extras);
         setActivityIntent(i);
-        solo = new SoloEnhanced(getInstrumentation(), this.getActivity());
+        solo = new SoloEnhanced(getInstrumentation());
         viewFetcher = new PublicViewFetcher(getInstrumentation(), this.getActivity());
         actions = new Actions(getInstrumentation(), this);
         instrumentation = getInstrumentation();

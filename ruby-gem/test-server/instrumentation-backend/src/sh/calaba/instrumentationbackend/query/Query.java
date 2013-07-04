@@ -120,10 +120,7 @@ public class Query {
 			try {
 				return new UIQueryASTClassName(Class.forName(step.getText()));
 			} catch (ClassNotFoundException e) {
-				// TODO Auto-generated catch block
-				throw new InvalidUIQueryException("Qualified class name: "
-						+ step.getText() + " not found. (" + e.getMessage()
-						+ ")");
+				return new UIQueryASTClassName((String)null);
 			}
 		case UIQueryParser.NAME:
 			return new UIQueryASTClassName(step.getText());
@@ -164,8 +161,7 @@ public class Query {
         Set<View> parents = new HashSet<View>();
         for (View v : viewFetcher.getAllViews(false))
         {
-            View parent = viewFetcher.getTopParent(v);
-            System.out.println(parent);
+            View parent = viewFetcher.getTopParent(v);            
             parents.add(parent);
         }
         List<View> results = new ArrayList<View>();

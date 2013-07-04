@@ -1,3 +1,4 @@
+require 'httpclient'
 require 'json'
 require 'net/http'
 require 'open-uri'
@@ -62,6 +63,10 @@ module Operations
     default_device.install_app(app_path)
   end
 
+  def update_app(app_path)
+    default_device.update_app(app_path)
+  end
+
   def uninstall_apps
     default_device.uninstall_app(package_name(default_device.test_server_path))
     default_device.uninstall_app(package_name(default_device.app_path))
@@ -110,6 +115,18 @@ module Operations
 
   def set_gps_coordinates(latitude, longitude)
     default_device.set_gps_coordinates(latitude, longitude)
+  end
+
+  def get_preferences(name)
+    default_device.get_preferences(name)
+  end
+
+  def set_preferences(name, hash)
+    default_device.set_preferences(name, hash)
+  end
+
+  def clear_preferences(name)
+    default_device.clear_preferences(name)
   end
 
   def query(uiquery, *args)
@@ -173,8 +190,8 @@ module Operations
     def initialize(cucumber_world, serial, server_port, app_path, test_server_path, test_server_port = 7102)
 
       @cucumber_world = cucumber_world
-      @serial = serial
-      @server_port = server_port
+      @serial = serial || default_serial
+      @server_port = server_port || default_server_port
       @app_path = app_path
       @test_server_path = test_server_path
       @test_server_port = test_server_port
@@ -207,6 +224,19 @@ module Operations
         ::Cucumber.wants_to_quit = true
         raise "#{pn} did not get installed. Aborting!"
       end
+    end
+
+    def update_app(app_path)
+      cmd = "#{adb_command} install -r \"#{app_path}\""
+      log "Updating: #{app_path}"
+      result = `#{cmd}`
+      log "result: #{result}"
+      succeeded = result.include?("Success")
+
+      unless succeeded
+        ::Cucumber.wants_to_quit = true
+        raise "#{pn} did not get updated. Aborting!"
+      end    
     end
 
     def uninstall_app(package_name)
@@ -254,15 +284,86 @@ module Operations
 
     def http(path, data = {}, options = {})
       begin
-        http = Net::HTTP.new "127.0.0.1", @server_port
-        http.open_timeout = options[:open_timeout] if options[:open_timeout]
-        http.read_timeout = options[:read_timeout] if options[:read_timeout]
-        resp = http.post(path, "#{data.to_json}", {"Content-Type" => "application/json;charset=utf-8"})
-        resp.body
-      rescue EOFError => e
-          log "It looks like your app is no longer running. \nIt could be because of a crash or because your test script shut it down."
-          raise e
+
+        configure_http(@http, options)
+        make_http_request(
+            :method => :post,
+            :body => data.to_json,
+            :uri => url_for(path),
+            :header => {"Content-Type" => "application/json;charset=utf-8"})
+
+      rescue HTTPClient::TimeoutError,
+             HTTPClient::KeepAliveDisconnected,
+             Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::ECONNABORTED,
+             Errno::ETIMEDOUT => e
+        log "It looks like your app is no longer running. \nIt could be because of a crash or because your test script shut it down."
+        raise e
       end
+    end
+
+    def set_http(http)
+      @http = http
+    end
+
+    def url_for(method)
+      url = URI.parse(ENV['DEVICE_ENDPOINT']|| "http://127.0.0.1:#{@server_port}")
+      path = url.path
+      if path.end_with? "/"
+        path = "#{path}#{method}"
+      else
+        path = "#{path}/#{method}"
+      end
+      url.path = path
+      url
+    end
+
+
+
+    def make_http_request(options)
+      body = nil
+      begin
+        unless @http
+          @http = init_request(options)
+        end
+        header = options[:header] || {}
+        header["Content-Type"] = "application/json;charset=utf-8"
+        options[:header] = header
+
+        if options[:method] == :post
+          body = @http.post(options[:uri], options).body
+        else
+          body = @http.get(options[:uri], options).body
+        end
+      rescue Exception => e
+        if @http
+          @http.reset_all
+          @http=nil
+        end
+        raise e
+      end
+      body
+    end
+
+    def init_request(options)
+      http = HTTPClient.new
+      configure_http(http, options)
+    end
+
+    def configure_http(http, options)
+      return unless http
+      http.connect_timeout = options[:open_timeout] || 15
+      http.send_timeout = options[:send_timeout] || 15
+      http.receive_timeout = options[:read_timeout] || 15
+      if options.has_key?(:debug) && options[:debug]
+        http.debug_dev= $stdout
+      else
+        if ENV['DEBUG_HTTP'] and (ENV['DEBUG_HTTP'] != '0')
+          http.debug_dev = $stdout
+        else
+          http.debug_dev= nil
+        end
+      end
+      http
     end
 
     def screenshot(options={:prefix => nil, :name => nil})
@@ -311,16 +412,33 @@ module Operations
       end
     end
 
-    def serial
-      @serial || default_serial
-    end
-
     def default_serial
       devices = connected_devices
       log "connected_devices: #{devices}"
       raise "No connected devices" if devices.empty?
       raise "More than one device connected. Specify device serial using ADB_DEVICE_ARG" if devices.length > 1
       devices.first
+    end
+
+    def default_server_port
+      require 'yaml'
+      File.open(File.expand_path('~/.calabash.yaml'), File::RDWR|File::CREAT) do |f|
+        f.flock(File::LOCK_EX)
+        state = YAML::load(f) || {}
+        ports = state['server_ports'] ||= {}
+        return ports[serial] if ports.has_key?(serial)
+
+        port = 34777
+        port += 1 while ports.has_value?(port)
+        ports[serial] = port
+
+        f.rewind
+        f.write(YAML::dump(state))
+        f.truncate(f.pos)
+
+        log "Persistently allocated port #{port} to #{serial}"
+        return port
+      end
     end
 
     def connected_devices
@@ -462,9 +580,116 @@ module Operations
     def set_gps_coordinates(latitude, longitude)
       perform_action('set_gps_coordinates', latitude, longitude)
     end
+
+    def get_preferences(name)
+
+      log "Get preferences: #{name}, app running? #{app_running?}"
+      preferences = {}
+
+      if app_running?
+        json = perform_action('get_preferences', name);
+      else
+
+        logcat_id = get_logcat_id()
+        cmd = "#{adb_command} shell am instrument -e logcat #{logcat_id} -e name \"#{name}\" #{package_name(@test_server_path)}/sh.calaba.instrumentationbackend.GetPreferences"
+
+        raise "Could not get preferences" unless system(cmd)
+
+        logcat_cmd = get_logcat_cmd(logcat_id)
+        logcat_output = `#{logcat_cmd}`
+
+        json = get_json_from_logcat(logcat_output)
+
+        raise "Could not get preferences" unless json != nil and json["success"]
+      end
+
+      # at this point we have valid json, coming from an action
+      # or instrumentation, but we don't care, just parse
+      if json["bonusInformation"].length > 0
+          json["bonusInformation"].each do |item|
+          json_item = JSON.parse(item)
+          preferences[json_item["key"]] = json_item["value"]
+        end
+      end
+
+      preferences
+    end
+
+    def set_preferences(name, hash)
+
+      log "Set preferences: #{name}, #{hash}, app running? #{app_running?}"
+
+      if app_running?
+        perform_action('set_preferences', name, hash);
+      else
+
+        params = hash.map {|k,v| "-e \"#{k}\" \"#{v}\""}.join(" ")
+
+        logcat_id = get_logcat_id()
+        cmd = "#{adb_command} shell am instrument -e logcat #{logcat_id} -e name \"#{name}\" #{params} #{package_name(@test_server_path)}/sh.calaba.instrumentationbackend.SetPreferences"
+
+        raise "Could not set preferences" unless system(cmd)
+
+        logcat_cmd = get_logcat_cmd(logcat_id)
+        logcat_output = `#{logcat_cmd}`
+
+        json = get_json_from_logcat(logcat_output)
+
+        raise "Could not set preferences" unless json != nil and json["success"]
+      end
+    end
+
+    def clear_preferences(name)
+
+      log "Clear preferences: #{name}, app running? #{app_running?}"
+
+      if app_running?
+        perform_action('clear_preferences', name);
+      else
+        
+        logcat_id = get_logcat_id()
+        cmd = "#{adb_command} shell am instrument -e logcat #{logcat_id} -e name \"#{name}\" #{package_name(@test_server_path)}/sh.calaba.instrumentationbackend.ClearPreferences"
+        raise "Could not clear preferences" unless system(cmd)
+
+        logcat_cmd = get_logcat_cmd(logcat_id)
+        logcat_output = `#{logcat_cmd}`
+
+        json = get_json_from_logcat(logcat_output)
+
+        raise "Could not clear preferences" unless json != nil and json["success"]
+      end
+    end
+
+    def get_json_from_logcat(logcat_output)
+
+      logcat_output.split(/\r?\n/).each do |line|
+        begin
+          json = JSON.parse(line)
+          return json
+        rescue
+          # nothing to do here, just discarding logcat rubbish
+        end
+      end
+
+      return nil
+    end
+
+    def get_logcat_id()
+      # we need a unique logcat tag so we can later
+      # query the logcat output and filter out everything
+      # but what we are interested in
+
+      random = (0..10000).to_a.sample
+      "#{Time.now.strftime("%s")}_#{random}"
+    end
+
+    def get_logcat_cmd(tag)
+      # returns raw logcat output for our tag
+      # filtering out everthing else
+
+      "#{adb_command} logcat -d -v raw #{tag}:* *:S"
+    end
   end
-
-
 
   def label(uiquery)
     ni
@@ -493,8 +718,8 @@ module Operations
     performAction("touch_coordinate", center_x, center_y)
   end
 
-  def http(options, data=nil)
-    default_device.http(options, data)
+  def http(path, data = {}, options = {})
+    default_device.http(path, data, options)
   end
 
   def html(q)
@@ -620,12 +845,12 @@ module Operations
     res['results']
   end
 
-  def url_for( verb )
-    ni
+  def url_for( method )
+    default_device.url_for(method)
   end
 
-  def make_http_request( url, req )
-    ni
+  def make_http_request(options)
+    default_device.make_http_request(options)
   end
 
 end
